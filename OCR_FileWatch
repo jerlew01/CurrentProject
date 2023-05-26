@@ -1,0 +1,110 @@
+#include <windows.h>
+#include <tesseract/baseapi.h>
+#include <leptonica/allheaders.h>
+#include <iostream>
+#include <string>
+#include <locale>
+#include <codecvt>
+
+void ToClipboard(const std::string& s)
+{
+    OpenClipboard(0);
+    EmptyClipboard();
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, s.size() + 1);
+    if (!hg)
+    {
+        CloseClipboard();
+        return;
+    }
+    memcpy(GlobalLock(hg), s.c_str(), s.size() + 1);
+    GlobalUnlock(hg);
+    SetClipboardData(CF_TEXT, hg);
+    CloseClipboard();
+    GlobalFree(hg);
+}
+
+std::string PerformOCR(const std::string& imagePath)
+{
+    char* outText;
+
+    // Create Tesseract object
+    tesseract::TessBaseAPI* api = new tesseract::TessBaseAPI();
+
+    // Initialize tesseract to use English (eng) and the LSTM OCR engine.
+    if (api->Init(NULL, "eng", tesseract::OEM_LSTM_ONLY))
+    {
+        std::cerr << "Could not initialize tesseract." << std::endl;
+        exit(1);
+    }
+
+    // Open input image using leptonica library
+    Pix* image = pixRead(imagePath.c_str());
+    api->SetImage(image);
+
+    // Get OCR result
+    outText = api->GetUTF8Text();
+
+    std::string str_outText(outText);
+
+    // Destroy used object and release memory
+    api->End();
+    pixDestroy(&image);
+
+    return str_outText;
+}
+
+
+void WatchDirectory(LPCWSTR directory)
+{
+    DWORD buffer[1024];
+    DWORD bytesReturned;
+
+    HANDLE directoryHandle = CreateFile(directory,
+        FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        NULL);
+
+    if (directoryHandle == INVALID_HANDLE_VALUE)
+    {
+        std::cerr << "Could not open directory." << std::endl;
+        exit(1);
+    }
+
+    while (true) {
+        if (ReadDirectoryChangesW(directoryHandle,
+            buffer,
+            sizeof(buffer),
+            TRUE,
+            FILE_NOTIFY_CHANGE_FILE_NAME,
+            &bytesReturned,
+            NULL,
+            NULL))
+        {
+
+            FILE_NOTIFY_INFORMATION* notification =
+                reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer);
+
+            // If the file action is creation or renaming (which could be an upload), print a message.
+            if (notification->Action == FILE_ACTION_ADDED ||
+                notification->Action == FILE_ACTION_RENAMED_NEW_NAME)
+            {
+                std::wstring wstrFileName(notification->FileName, notification->FileNameLength / sizeof(WCHAR));
+                std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> converter;
+                std::string strFileName = converter.to_bytes(wstrFileName);
+                std::string imagePath = "C:\\Users\\jerle\\Documents\\exceptions\\RTOMaldev\\screenshots\\" + strFileName;
+                std::string ocrText = PerformOCR(imagePath);
+                ToClipboard(ocrText);
+            }
+        }
+    }
+}
+
+int main()
+{
+    WatchDirectory(L"C:\\Users\\jerle\\Documents\\exceptions\\RTOMaldev\\screenshots");
+
+    return 0;
+}
