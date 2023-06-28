@@ -1,0 +1,226 @@
+import os
+import openai
+import time
+import json
+import cv2
+import base64
+import requests
+import hashlib
+import logging
+from PIL import Image
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from skimage.io import imread, imsave
+from skimage.util import img_as_ubyte
+
+# OpenAI API setup
+openai.api_key = ''
+organization = ""
+
+# Path setup
+directory_to_watch = r''
+
+# Global variables for cropping
+ix, iy = -1, -1
+drawing = False
+img = None
+cropping = True
+crop_region = None
+
+# Mathpix API credentials
+mathpix_app_id = 'jerlew01_gmail_com_d2276d_b81576'
+mathpix_app_key = '03b14ee59184e3c7c68e1b317859b2b55b6c03a053bc3c13b72d3a955275a9cf'
+
+# Create a custom logger
+logger = logging.getLogger(__name__)
+
+# Set level of logger
+logger.setLevel(logging.INFO)
+
+logging.basicConfig(filename='C:\\Users\\jerle\\Documents\\exceptions\\RTOMaldev\\log.txt', level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+
+# Create handlers
+handler = logging.FileHandler('log.txt')  # log all INFO and higher level msgs
+handler.setLevel(logging.INFO)
+
+# Create formatters and add it to handlers
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+
+# Add handlers to the logger
+logger.addHandler(handler)
+
+# Mouse callback function
+def draw_rectangle(event, x, y, flags, param):
+    global ix, iy, drawing, img, cropping, crop_region
+
+    if event == cv2.EVENT_LBUTTONDOWN:
+        drawing = True
+        ix, iy = x, y
+        cropping = True
+
+    elif event == cv2.EVENT_MOUSEMOVE:
+        if drawing:
+            img2 = img.copy()
+            cv2.rectangle(img2, pt1=(min(ix, x), min(iy, y)), pt2=(max(ix, x), max(iy, y)), color=(0, 255, 0), thickness=1)
+            cv2.imshow('image', img2)
+
+    elif event == cv2.EVENT_LBUTTONUP:
+        drawing = False
+        cv2.rectangle(img, pt1=(min(ix, x), min(iy, y)), pt2=(max(ix, x), max(iy, y)), color=(0, 255, 0), thickness=1)
+        crop_region = [min(ix, x), min(iy, y), max(ix, x), max(iy, y)]
+        cropping = False
+
+# Mathpix OCR function
+def mathpix_ocr(image_file):
+    with open(image_file, 'rb') as f:
+        image_data = base64.b64encode(f.read()).decode('ascii')
+
+    headers = {
+        'app_id': mathpix_app_id,
+        'app_key': mathpix_app_key,
+        'Content-type': 'application/json'
+    }
+
+    data = {
+        'src': 'data:image/jpeg;base64,' + image_data,
+        'formats': ['text', 'latex'],
+    }
+
+    response = requests.post('https://api.mathpix.com/v3/text', headers=headers, data=json.dumps(data))
+
+    return response.json()
+
+class MyHandler(FileSystemEventHandler):
+    def __init__(self):
+        self.last_processed_file = None
+        self.last_processed_time = None
+        self.last_processed_hash = None
+
+    def calculate_md5(self, file_path):
+        hash_md5 = hashlib.md5()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+
+    def should_process(self, file_path):
+        current_file_hash = self.calculate_md5(file_path)
+        if self.last_processed_file == file_path and current_file_hash == self.last_processed_hash:
+            if time.time() - self.last_processed_time < 10:  
+                return False
+
+        self.last_processed_hash = current_file_hash
+        return True
+
+    def on_created(self, event):
+        global crop_region
+        crop_region = None
+
+        if not self.should_process(event.src_path):
+            return
+
+        self.last_processed_file = event.src_path
+        self.last_processed_time = time.time()
+
+        time.sleep(1)
+
+        try:
+            image = imread(event.src_path)
+            image = img_as_ubyte(image)
+            imsave('image.jpg', image)
+
+            image = Image.open('image.jpg')
+
+            if crop_region:
+                cropped_image = image.crop((crop_region[0], crop_region[1], crop_region[2], crop_region[3]))
+                cropped_image.save(os.path.join(directory_to_watch, 'cropped_image.jpg'))
+                image = cropped_image
+        except Exception as e:
+            print("Error in preprocessing: ", e)
+            logger.error(f"Error in preprocessing: {str(e)}")
+            return
+
+        ocr_result = mathpix_ocr(event.src_path)
+
+        if 'error' in ocr_result:
+            print(f"OCR Error: {ocr_result['error']}")
+            logger.error(f"OCR Error: {ocr_result['error']}")
+            return
+
+        text = ocr_result.get('text', '')
+
+        lines = text.strip().split('\n')
+        if len(lines) > 1:
+            question = lines[0]
+            options = '\n'.join(lines[1:])
+            if question.strip() and options.strip():
+                os.system('cls')
+                print(f"Question: {question}")
+                print(f"Options: {options}")
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": f"{question}\n{options}"},
+                    {"role": "user", "content": "What's the correct answer from the given options?"},
+                ]
+
+                try:
+                    response = openai.ChatCompletion.create(
+                        model="gpt-3.5-turbo-0613",
+                        messages=messages,
+                        max_tokens=100
+                    )
+
+                    ai_answer = response['choices'][0]['message']['content']
+                    os.system('cls')
+                    print("AI's answer: ", ai_answer)
+
+                    # Log question, options, and AI's answer
+                    logger.info(f"Question: {question}")
+                    logger.info(f"Options: {options}")
+                    logger.info(f"AI's answer: {ai_answer}")
+
+                except Exception as e:
+                    print("OpenAI API Error:", str(e))
+                    logger.error(f"OpenAI API Error: {str(e)}")
+        else:
+            print("No question detected in the text.")
+            logger.error("No question detected in the text.")
+
+def watch_directory(directory):
+    event_handler = MyHandler()
+    observer = Observer()
+    observer.schedule(event_handler, directory, recursive=True)
+    observer.start()
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
+
+if __name__ == "__main__":
+    img_path = os.path.join(directory_to_watch, 'my_image.jpg')
+    img = cv2.imread(img_path)
+
+    screen_res = 1280, 720
+    scale_width = screen_res[0] / img.shape[1]
+    scale_height = screen_res[1] / img.shape[0]
+    scale = min(scale_width, scale_height)
+    window_width = int(img.shape[1] * scale)
+    window_height = int(img.shape[0] * scale)
+    cv2.namedWindow('image', cv2.WINDOW_NORMAL)
+    cv2.resizeWindow('image', window_width, window_height)
+
+    cv2.setMouseCallback('image', draw_rectangle)
+
+    while(1):
+        cv2.imshow('image', img)
+        k = cv2.waitKey(1) & 0xFF
+        if k == ord('q') or not cropping:
+            break
+
+    cv2.destroyAllWindows()
+
+    watch_directory(directory_to_watch)
